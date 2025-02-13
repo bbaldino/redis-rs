@@ -33,7 +33,7 @@ mod pubsub;
 pub use pubsub::{PubSub, PubSubSink, PubSubStream};
 
 /// Represents the ability of connecting via TCP or via Unix socket
-pub(crate) trait RedisRuntime: AsyncStream + Send + Sync + Sized + 'static {
+pub trait RedisRuntime: AsyncStream + Send + Sync + Sized + 'static {
     /// Performs a TCP connection
     async fn connect_tcp(
         socket_addr: SocketAddr,
@@ -148,7 +148,7 @@ mod connection_manager;
 #[cfg(feature = "connection-manager")]
 #[cfg_attr(docsrs, doc(cfg(feature = "connection-manager")))]
 pub use connection_manager::*;
-mod runtime;
+pub mod runtime;
 pub(super) use runtime::*;
 
 macro_rules! check_resp3 {

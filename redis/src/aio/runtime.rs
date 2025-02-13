@@ -10,7 +10,7 @@ use super::RedisRuntime;
 use crate::types::RedisError;
 
 #[derive(Clone, Debug)]
-pub(crate) enum Runtime {
+pub enum Runtime {
     #[cfg(feature = "tokio-comp")]
     Tokio,
     #[cfg(feature = "async-std-comp")]
@@ -59,7 +59,7 @@ impl SharedHandleContainer {
 }
 
 impl Runtime {
-    pub(crate) fn locate() -> Self {
+    pub fn locate() -> Self {
         #[cfg(all(feature = "tokio-comp", not(feature = "async-std-comp")))]
         {
             Runtime::Tokio

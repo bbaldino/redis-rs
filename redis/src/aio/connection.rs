@@ -25,6 +25,7 @@ use futures_util::{
     future::FutureExt,
     stream::{Stream, StreamExt},
 };
+use log::info;
 use std::net::SocketAddr;
 use std::pin::Pin;
 #[cfg(any(feature = "tokio-comp", feature = "async-std-comp"))]
@@ -215,7 +216,7 @@ where
     }
 }
 
-pub(crate) async fn connect<C>(connection_info: &ConnectionInfo) -> RedisResult<Connection<C>>
+pub async fn connect<C>(connection_info: &ConnectionInfo) -> RedisResult<Connection<C>>
 where
     C: Unpin + RedisRuntime + AsyncRead + AsyncWrite + Send,
 {
@@ -457,10 +458,11 @@ async fn get_socket_addrs(
     }
 }
 
-pub(crate) async fn connect_simple<T: RedisRuntime>(
+pub async fn connect_simple<T: RedisRuntime>(
     connection_info: &ConnectionInfo,
     tcp_settings: &TcpSettings,
 ) -> RedisResult<T> {
+    info!("BRIAN: connecting with connection info: {connection_info:?}");
     Ok(match connection_info.addr {
         ConnectionAddr::Tcp(ref host, port) => {
             let socket_addrs = get_socket_addrs(host, port).await?;

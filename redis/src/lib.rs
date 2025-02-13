@@ -660,7 +660,7 @@ pub mod caching;
 mod client;
 mod cmd;
 mod commands;
-mod connection;
+pub mod connection;
 /// Module for defining I/O behavior.
 pub mod io;
 mod parser;
