@@ -223,6 +223,9 @@ impl RedisRuntime for AsyncStd {
         tls_params: &Option<TlsConnParams>,
         tcp_settings: &crate::io::tcp::TcpSettings,
     ) -> RedisResult<Self> {
+        use log::info;
+
+        info!("BRIAN: async_std::connect_tcp_tls");
         let tcp_stream = connect_tcp(&socket_addr, tcp_settings).await?;
 
         let config = create_rustls_config(insecure, tls_params.clone())?;

@@ -19,6 +19,7 @@ use futures_util::{
     sink::Sink,
     stream::{self, Stream, StreamExt},
 };
+use log::info;
 use pin_project_lite::pin_project;
 use std::collections::VecDeque;
 use std::fmt;
@@ -26,7 +27,7 @@ use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{self, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(any(feature = "tokio-comp", feature = "async-std-comp"))]
 use tokio_util::codec::Decoder;
 
@@ -43,6 +44,7 @@ enum ResponseAggregate {
 }
 
 // TODO - this is a really bad name.
+#[derive(Debug)]
 struct PipelineResponseExpectation {
     // The number of responses to skip before starting to save responses in the buffer.
     skipped_response_count: usize,
@@ -72,12 +74,22 @@ struct InFlight {
 
 // A single message sent through the pipeline
 struct PipelineMessage {
-    input: Vec<u8>,
+    pub(crate) input: Vec<u8>,
     output: PipelineOutput,
     // If `None`, this is a single request, not a pipeline of multiple requests.
     // If `Some`, the first value is the number of responses to skip,
     // the second is the number of responses to keep, and the third is whether the pipeline is a transaction.
     expectation: Option<PipelineResponseExpectation>,
+}
+
+impl Debug for PipelineMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PipelineMessage")
+            .field("input", &String::from_utf8(self.input.clone()))
+            .field("output", &self.output)
+            .field("expectation", &self.expectation)
+            .finish()
+    }
 }
 
 /// Wrapper around a `Stream + Sink` where each item sent through the `Sink` results in one or more
@@ -364,7 +376,7 @@ impl Pipeline {
         T::Error: ::std::fmt::Debug,
     {
         const BUFFER_SIZE: usize = 50;
-        let (sender, mut receiver) = mpsc::channel(BUFFER_SIZE);
+        let (sender, mut receiver) = mpsc::channel::<PipelineMessage>(BUFFER_SIZE);
 
         let sink = PipelineSink::new(
             sink_stream,
@@ -372,10 +384,24 @@ impl Pipeline {
             #[cfg(feature = "cache-aio")]
             cache_manager,
         );
-        let f = stream::poll_fn(move |cx| receiver.poll_recv(cx))
-            .map(Ok)
-            .forward(sink)
-            .map(|_| ());
+        let f = stream::poll_fn(move |cx| {
+            info!("BRIAN: polling main receiver, len = {}", receiver.len());
+            let res = receiver.poll_recv(cx);
+            info!("BRIAN: main receiver poll got res: {res:?}");
+
+            res
+        })
+        .map(Ok)
+        .inspect(|v| {
+            if let Ok(m) = v {
+                match String::from_utf8(m.input.clone()) {
+                    Ok(s) => info!("BRIAN: receiver got command {s}"),
+                    Err(_) => info!("BRIAN: received got command but couldn't parse as string"),
+                }
+            }
+        })
+        .forward(sink)
+        .map(|_| ());
         (Pipeline { sender }, f)
     }
 
@@ -389,6 +415,7 @@ impl Pipeline {
     ) -> Result<Value, Option<RedisError>> {
         let (sender, receiver) = oneshot::channel();
 
+        let start = Instant::now();
         self.sender
             .send(PipelineMessage {
                 input,
@@ -397,11 +424,17 @@ impl Pipeline {
             })
             .await
             .map_err(|_| None)?;
+        let end = Instant::now();
+        info!("BRIAN: took {:?} to send pipeline command", (end - start));
 
+        info!("BRIAN: Pipeline::send_recv sending command with timeout {timeout:?}");
         match timeout {
             Some(timeout) => match Runtime::locate().timeout(timeout, receiver).await {
                 Ok(res) => res,
-                Err(elapsed) => Ok(Err(elapsed.into())),
+                Err(elapsed) => {
+                    info!("BRIAN: Pipeline::send_recv timed out waiting for command response");
+                    Ok(Err(elapsed.into()))
+                }
             },
             None => receiver.await,
         }
@@ -491,6 +524,7 @@ impl MultiplexedConnection {
     where
         C: Unpin + AsyncRead + AsyncWrite + Send + 'static,
     {
+        info!("BRIAN: TEST2");
         #[cfg(all(not(feature = "tokio-comp"), not(feature = "async-std-comp")))]
         compile_error!("tokio-comp or async-std-comp features required for aio feature");
 
@@ -596,6 +630,10 @@ impl MultiplexedConnection {
                 _ => (),
             }
         }
+        info!(
+            "BRIAN: sending command to piipeline with timeout of {:?}",
+            self.response_timeout
+        );
         self.pipeline
             .send_recv(cmd.get_packed_command(), None, self.response_timeout)
             .await

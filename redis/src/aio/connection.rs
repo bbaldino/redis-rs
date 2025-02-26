@@ -462,7 +462,9 @@ pub async fn connect_simple<T: RedisRuntime>(
     connection_info: &ConnectionInfo,
     tcp_settings: &TcpSettings,
 ) -> RedisResult<T> {
-    info!("BRIAN: connecting with connection info: {connection_info:?}");
+    info!("BRIAN: connecting with connection_info: {connection_info:?}");
+    let bt = std::backtrace::Backtrace::capture();
+    info!("BRIAN bt: {bt}");
     Ok(match connection_info.addr {
         ConnectionAddr::Tcp(ref host, port) => {
             let socket_addrs = get_socket_addrs(host, port).await?;
@@ -478,8 +480,11 @@ pub async fn connect_simple<T: RedisRuntime>(
             insecure,
             ref tls_params,
         } => {
+            info!("BRIAN: connecting via TcpTls");
             let socket_addrs = get_socket_addrs(host, port).await?;
+            info!("BRIAN: connecting via TcpTls, got socket addrs");
             select_ok(socket_addrs.map(|socket_addr| {
+                info!("BRIAN: inside socket addrs map, calling T::connect_tcp_tls for addr {socket_addr:?}");
                 Box::pin(<T>::connect_tcp_tls(
                     host,
                     socket_addr,

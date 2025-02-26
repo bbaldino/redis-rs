@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -12,7 +13,7 @@ use crate::{
 };
 
 use futures_util::{future::BoxFuture, ready};
-use log::trace;
+use log::{info, trace};
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
 
@@ -199,13 +200,18 @@ fn choose_response<C>(
             (retry, PollFlushAction::ReconnectFromInitialConnections)
         }
 
-        (OperationTarget::Node { address }, RetryMethod::Reconnect) => (
-            retry_or_send!(|mut request: PendingRequest<C>| {
-                request.cmd.reset_routing();
-                Retry::MoveToPending { request }
-            }),
-            PollFlushAction::Reconnect(vec![address]),
-        ),
+        (OperationTarget::Node { address }, RetryMethod::Reconnect) => {
+            let mut set = HashSet::new();
+            set.insert(address);
+
+            (
+                retry_or_send!(|mut request: PendingRequest<C>| {
+                    request.cmd.reset_routing();
+                    Retry::MoveToPending { request }
+                }),
+                PollFlushAction::Reconnect(set),
+            )
+        }
 
         (OperationTarget::FanOut, _) => {
             // Fanout operation are retried per internal request, and don't need additional retries.
@@ -271,14 +277,24 @@ impl<C> Future for Request<C> {
     type Output = (Option<Retry<C>>, PollFlushAction);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context) -> Poll<Self::Output> {
+        info!("BRIAN: Request::poll");
         let mut this = self.as_mut().project();
         if this.request.is_none() || this.request.as_ref().unwrap().sender.is_closed() {
+            if this.request.is_none() {
+                info!("BRIAN: request is None");
+            } else {
+                info!("BRIAN: request sender is closed");
+            }
             return Poll::Ready((None, PollFlushAction::None));
         };
 
         let future = match this.future.as_mut().project() {
-            RequestStateProj::Future { future } => future,
+            RequestStateProj::Future { future } => {
+                info!("BRIAN: Request future is in future state");
+                future
+            }
             RequestStateProj::Sleep { sleep } => {
+                info!("BRIAN: request future is in sleep state");
                 ready!(sleep.poll(cx));
                 return (
                     Some(Retry::Immediately {
@@ -290,7 +306,9 @@ impl<C> Future for Request<C> {
                     .into();
             }
         };
+        info!("BRIAN: polling request future");
         let result = ready!(future.poll(cx));
+        info!("BRIAN: request future result is ready");
 
         // can unwrap, because we tested for `is_none`` earlier in the function
         let request = this.request.take().unwrap();

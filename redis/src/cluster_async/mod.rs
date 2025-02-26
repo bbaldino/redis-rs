@@ -91,7 +91,7 @@
 //! }
 //! ```
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     future::Future,
     io, mem,
@@ -126,7 +126,7 @@ use futures_util::{
     ready,
     stream::{self, Stream, StreamExt},
 };
-use log::{trace, warn};
+use log::{info, trace, warn};
 use rand::{seq::IteratorRandom, thread_rng};
 use request::{CmdArg, PendingRequest, Request, RequestState, Retry};
 use routing::{route_for_pipeline, InternalRoutingInfo, InternalSingleNodeRouting};
@@ -515,6 +515,7 @@ where
     }
 
     fn reconnect_to_initial_nodes(&mut self) -> impl Future<Output = ()> {
+        info!("BRIAN: reconnect_to_initial_nodes");
         let inner = self.inner.clone();
         async move {
             let connection_map =
@@ -539,7 +540,8 @@ where
         }
     }
 
-    fn refresh_connections(&mut self, addrs: Vec<String>) -> impl Future<Output = ()> {
+    fn refresh_connections(&mut self, addrs: HashSet<String>) -> impl Future<Output = ()> {
+        info!("BRIAN: refreshing {} connections", addrs.len());
         let inner = self.inner.clone();
         async move {
             let mut write_guard = inner.conn_lock.write().await;
@@ -560,12 +562,14 @@ where
                     },
                 )
                 .await;
+            info!("BRIAN: now have {} connections", connections.len());
             write_guard.0 = mem::take(&mut connections);
         }
     }
 
     // Query a node to discover slot-> master mappings.
     async fn refresh_slots(inner: Core<C>) -> RedisResult<()> {
+        info!("BRIAN: refresh_slots");
         let mut write_guard = inner.conn_lock.write().await;
         let mut connections = mem::take(&mut write_guard.0);
         let slots = &mut write_guard.1;
@@ -1002,6 +1006,7 @@ where
     }
 
     fn poll_complete(&mut self, cx: &mut task::Context<'_>) -> Poll<PollFlushAction> {
+        info!("BRIAN: poll_complete determing poll action, defaulting to None");
         let mut poll_flush_action = PollFlushAction::None;
 
         let mut pending_requests_guard = self.inner.pending_requests.lock().unwrap();
@@ -1027,11 +1032,16 @@ where
         drop(pending_requests_guard);
 
         loop {
+            info!(
+                "BRIAN: in_flight_requests.len() = {}",
+                self.in_flight_requests.len()
+            );
             let (request_handling, next) =
                 match Pin::new(&mut self.in_flight_requests).poll_next(cx) {
                     Poll::Ready(Some(result)) => result,
                     Poll::Ready(None) | Poll::Pending => break,
                 };
+            info!("BRIAN: poll_complete got next state from in_flight_requests: {next:?}");
             match request_handling {
                 Some(Retry::MoveToPending { request }) => {
                     self.inner.pending_requests.lock().unwrap().push(request)
@@ -1061,11 +1071,16 @@ where
                 }
                 None => {}
             };
+            info!("BRIAN: poll_complete got a next state of {next:?}");
             poll_flush_action = poll_flush_action.change_state(next);
+            info!(
+                "BRIAN: poll_complete bottom of loop poll_flush_action is now {poll_flush_action:?}"
+            );
         }
 
         if !matches!(poll_flush_action, PollFlushAction::None) || self.in_flight_requests.is_empty()
         {
+            info!("BRIAN: poll_complete returning poll flush action {poll_flush_action:?}");
             Poll::Ready(poll_flush_action)
         } else {
             Poll::Pending
@@ -1092,11 +1107,25 @@ where
         conn_option: Option<ConnectionFuture<C>>,
         params: &ClusterParams,
     ) -> RedisResult<C> {
+        info!("BRIAN: get_or_create_conn for addr {addr}");
         if let Some(conn) = conn_option {
             let mut conn = conn.await;
+            info!("BRIAN: connection for addr {addr} exists, checking if it's active");
             match check_connection(&mut conn).await {
-                Ok(_) => Ok(conn),
-                Err(_) => connect_and_check(addr, params.clone()).await,
+                Ok(_) => {
+                    info!("BRIAN: connection is active, returning");
+                    Ok(conn)
+                }
+                Err(e) => {
+                    info!("BRIAN: connection had error {e}, reconnecting");
+                    match connect_and_check(addr, params.clone()).await {
+                        Ok(v) => Ok(v),
+                        Err(e) => {
+                            info!("BRIAN connect_and_check had error: {e:?}");
+                            Err(e)
+                        }
+                    }
+                }
             }
         } else {
             connect_and_check(addr, params.clone()).await
@@ -1108,7 +1137,7 @@ where
 enum PollFlushAction {
     None,
     RebuildSlots,
-    Reconnect(Vec<String>),
+    Reconnect(HashSet<String>),
     ReconnectFromInitialConnections,
 }
 
@@ -1193,18 +1222,24 @@ where
             }
 
             match ready!(self.poll_complete(cx)) {
-                PollFlushAction::None => return Poll::Ready(Ok(())),
+                PollFlushAction::None => {
+                    info!("BRIAN: ClusterConnInner::poll_complete returned PollFlushAction::None");
+                    return Poll::Ready(Ok(()));
+                }
                 PollFlushAction::RebuildSlots => {
+                    info!("BRIAN: ClusterConnInner::poll_complete returned PollFlushAction::RebuildSlots");
                     self.state = ConnectionState::Recover(RecoverFuture::RecoverSlots(Box::pin(
                         Self::refresh_slots(self.inner.clone()),
                     )));
                 }
                 PollFlushAction::Reconnect(addrs) => {
+                    info!("BRIAN: ClusterConnInner::poll_complete returned PollFlushAction::Reconnect");
                     self.state = ConnectionState::Recover(RecoverFuture::Reconnect(Box::pin(
                         self.refresh_connections(addrs),
                     )));
                 }
                 PollFlushAction::ReconnectFromInitialConnections => {
+                    info!("BRIAN: ClusterConnInner::poll_complete returned PollFlushAction::ReconnectFromInitialConnections");
                     self.state = ConnectionState::Recover(RecoverFuture::Reconnect(Box::pin(
                         self.reconnect_to_initial_nodes(),
                     )));
@@ -1292,6 +1327,7 @@ impl Connect for MultiplexedConnection {
     where
         T: IntoConnectionInfo + Send + 'a,
     {
+        info!("BRIAN: <MultiplexedConnection as Connect>::connect_with_config");
         async move {
             let connection_info = info.into_connection_info()?;
             let client = crate::Client::open(connection_info)?;
@@ -1328,6 +1364,7 @@ async fn connect_check_and_add<C>(core: Core<C>, addr: String) -> RedisResult<C>
 where
     C: ConnectionLike + Connect + Send + Clone + 'static,
 {
+    info!("BRIAN: connect_check_and_add calling connect_and_check");
     match connect_and_check::<C>(&addr, core.cluster_params.clone()).await {
         Ok(conn) => {
             let conn_clone = conn.clone();
@@ -1338,7 +1375,10 @@ where
                 .insert(addr, async { conn_clone }.boxed().shared());
             Ok(conn)
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            info!("BRIAN: connect_check_and_add connect_and_check had error: {err}");
+            Err(err)
+        }
     }
 }
 
@@ -1346,12 +1386,14 @@ async fn connect_and_check<C>(node: &str, params: ClusterParams) -> RedisResult<
 where
     C: ConnectionLike + Connect + Send + 'static,
 {
+    info!("BRIAN: connect_and_check node {node}");
     let read_from_replicas = params.read_from_replicas;
     let connection_timeout = params.connection_timeout;
     let response_timeout = params.response_timeout;
     let push_sender = params.async_push_sender.clone();
     let tcp_settings = params.tcp_settings.clone();
     let info = get_connection_info(node, params)?;
+    info!("BRIAN: connect_and_check got connection info");
     let mut config = AsyncConnectionConfig::default()
         .set_connection_timeout(connection_timeout)
         .set_response_timeout(response_timeout)
@@ -1359,7 +1401,15 @@ where
     if let Some(push_sender) = push_sender {
         config = config.set_push_sender_internal(push_sender);
     }
-    let mut conn: C = C::connect_with_config(info, config).await?;
+    info!("BRIAN: connect_and_check calling connect_with_config");
+    let mut conn: C = match C::connect_with_config(info, config).await {
+        Ok(c) => c,
+        Err(e) => {
+            info!("BRIAN: connect_with_config had error: {e:?}");
+            return Err(e);
+        }
+    };
+    info!("BRIAN: connect_and_check connect_with_config succeeded");
 
     let check = if read_from_replicas {
         // If READONLY is sent to primary nodes, it will have no effect

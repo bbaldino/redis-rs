@@ -1,4 +1,6 @@
 use super::{AsyncStream, RedisResult, RedisRuntime, SocketAddr, TaskHandle};
+use log::info;
+
 use std::{
     future::Future,
     io,
@@ -39,14 +41,18 @@ async fn connect_tcp(
     addr: &SocketAddr,
     tcp_settings: &crate::io::tcp::TcpSettings,
 ) -> io::Result<TcpStreamTokio> {
+    info!("BRIAN: tokio.rs::bare connect_tcp calling TcpStreamTokio::connect to addr {addr}");
     let socket = TcpStreamTokio::connect(addr).await?;
+    info!("BRIAN: tokio.rs::bare connect_tcp TcpStreamTokio::connect done");
     let std_socket = socket.into_std()?;
+    info!("BRIAN: tokio.rs::bare connect_tcp TcpStreamTokio::connect socket.into_std() done");
     let std_socket = crate::io::tcp::stream_with_settings(std_socket, tcp_settings)?;
+    info!("BRIAN: tokio.rs::bare connect_tcp TcpStreamTokio::connect stream_with_settings done");
 
     TcpStreamTokio::from_std(std_socket)
 }
 
-pub(crate) enum Tokio {
+pub enum Tokio {
     /// Represents a Tokio TCP connection.
     Tcp(TcpStreamTokio),
     /// Represents a Tokio TLS encrypted TCP connection
@@ -127,6 +133,9 @@ impl RedisRuntime for Tokio {
         _: &Option<TlsConnParams>,
         tcp_settings: &crate::io::tcp::TcpSettings,
     ) -> RedisResult<Self> {
+        info!("BRIAN: tokio.rs::connect_tcp_tls(native-tls)");
+        // info!("BRIAN: forcing insecure to true");
+        let insecure = true;
         let tls_connector: tokio_native_tls::TlsConnector = if insecure {
             TlsConnector::builder()
                 .danger_accept_invalid_certs(true)
@@ -137,10 +146,19 @@ impl RedisRuntime for Tokio {
             TlsConnector::new()?
         }
         .into();
-        Ok(tls_connector
+        info!("BRIAN: tokio.rs::connect_tcp_tls(native-tls), calling connect");
+        let res = tls_connector
             .connect(hostname, connect_tcp(&socket_addr, tcp_settings).await?)
             .await
-            .map(|con| Tokio::TcpTls(Box::new(con)))?)
+            .map(|con| Tokio::TcpTls(Box::new(con)));
+        info!(
+            "BRIAN: tokio.rs::connect_tcp_tls(native-tls), connect done.  error? {}",
+            res.is_err()
+        );
+
+        let res = res?;
+
+        Ok(res)
     }
 
     #[cfg(feature = "tls-rustls")]
@@ -151,16 +169,25 @@ impl RedisRuntime for Tokio {
         tls_params: &Option<TlsConnParams>,
         tcp_settings: &crate::io::tcp::TcpSettings,
     ) -> RedisResult<Self> {
+        info!("BRIAN: tokio.rs::connect_tcp_tls");
         let config = create_rustls_config(insecure, tls_params.clone())?;
         let tls_connector = TlsConnector::from(Arc::new(config));
 
-        Ok(tls_connector
+        info!("BRIAN: tokio.rs::connect_tcp_tls, calling connect");
+        let res = tls_connector
             .connect(
                 rustls::pki_types::ServerName::try_from(hostname)?.to_owned(),
                 connect_tcp(&socket_addr, tcp_settings).await?,
             )
             .await
-            .map(|con| Tokio::TcpTls(Box::new(con)))?)
+            .map(|con| Tokio::TcpTls(Box::new(con)));
+        info!(
+            "BRIAN: tokio.rs::connect_tcp_tls, connect done.  error? {}",
+            res.is_err()
+        );
+        let res = res?;
+
+        Ok(res)
     }
 
     #[cfg(unix)]

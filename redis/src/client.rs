@@ -341,10 +341,13 @@ impl Client {
         &self,
         config: &AsyncConnectionConfig,
     ) -> RedisResult<crate::aio::MultiplexedConnection> {
+        use log::info;
+
         let result = match Runtime::locate() {
             #[cfg(feature = "tokio-comp")]
             rt @ Runtime::Tokio => {
                 if let Some(connection_timeout) = config.connection_timeout {
+                    info!("BRIAN: get_multiplexed_async_connection_with_config getting connection with timeout");
                     rt.timeout(
                         connection_timeout,
                         self.get_multiplexed_async_connection_inner::<crate::aio::tokio::Tokio>(
