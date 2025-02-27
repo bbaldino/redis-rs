@@ -59,6 +59,10 @@ impl cluster_async::Connect for MockConnection {
             port,
         }))
     }
+
+    fn gen(&self) -> usize {
+        0
+    }
 }
 
 impl cluster::Connect for MockConnection {

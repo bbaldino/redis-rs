@@ -833,12 +833,17 @@ where
         };
 
         match Self::get_connection(route, core).await {
-            Ok((addr, mut conn)) => conn
-                .req_packed_command(&cmd)
-                .await
-                .and_then(|value| value.extract_error())
-                .map(Response::Single)
-                .map_err(|err| (addr.into(), err)),
+            Ok((addr, mut conn)) => {
+                let generation = conn.gen();
+                let result = conn
+                    .req_packed_command(&cmd)
+                    .await
+                    .and_then(|value| value.extract_error())
+                    .map(Response::Single)
+                    .map_err(|err| (addr.into(), err));
+                info!("SHACHAR: received response from gen {generation}");
+                result
+            }
             Err(err) => Err((OperationTarget::NotFound, err)),
         }
     }
@@ -1320,6 +1325,8 @@ pub trait Connect: Sized {
     ) -> RedisFuture<'a, Self>
     where
         T: IntoConnectionInfo + Send + 'a;
+
+    fn gen(&self) -> usize;
 }
 
 impl Connect for MultiplexedConnection {
@@ -1358,6 +1365,10 @@ impl Connect for MultiplexedConnection {
         }
         .boxed()
     }
+
+    fn gen(&self) -> usize {
+        self.generation
+    }
 }
 
 async fn connect_check_and_add<C>(core: Core<C>, addr: String) -> RedisResult<C>
@@ -1373,6 +1384,10 @@ where
                 .await
                 .0
                 .insert(addr, async { conn_clone }.boxed().shared());
+            info!(
+                "SHACHAR: connect_check_and_add connect_and_check succeeded with gen: {}",
+                conn.gen()
+            );
             Ok(conn)
         }
         Err(err) => {

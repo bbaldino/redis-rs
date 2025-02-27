@@ -25,6 +25,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::fmt::Debug;
 use std::pin::Pin;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::task::{self, Poll};
 use std::time::{Duration, Instant};
@@ -116,6 +117,7 @@ pin_project! {
         error: Option<RedisError>,
         push_sender: Option<Arc<dyn AsyncPushSender>>,
         cache_manager: Option<CacheManager>,
+        generation: usize,
     }
 }
 
@@ -127,6 +129,7 @@ pin_project! {
         in_flight: VecDeque<InFlight>,
         error: Option<RedisError>,
         push_sender: Option<Arc<dyn AsyncPushSender>>,
+        generation: usize,
     }
 }
 
@@ -148,6 +151,7 @@ where
         sink_stream: T,
         push_sender: Option<Arc<dyn AsyncPushSender>>,
         #[cfg(feature = "cache-aio")] cache_manager: Option<CacheManager>,
+        generation: usize,
     ) -> Self
     where
         T: Sink<Vec<u8>, Error = RedisError> + Stream<Item = RedisResult<Value>> + 'static,
@@ -157,6 +161,7 @@ where
             in_flight: VecDeque::new(),
             error: None,
             push_sender,
+            generation,
             #[cfg(feature = "cache-aio")]
             cache_manager,
         }
@@ -356,6 +361,7 @@ where
             ready!(self.as_mut().poll_flush(cx))?;
         }
         let this = self.as_mut().project();
+        info!("SHACHAR: closing pipeline for gen: {}", this.generation);
         this.sink_stream.poll_close(cx).map_err(|err| {
             self.send_result(Err(err));
         })
@@ -366,6 +372,7 @@ impl Pipeline {
     fn new<T>(
         sink_stream: T,
         push_sender: Option<Arc<dyn AsyncPushSender>>,
+        generation: usize,
         #[cfg(feature = "cache-aio")] cache_manager: Option<CacheManager>,
     ) -> (Self, impl Future<Output = ()>)
     where
@@ -383,6 +390,7 @@ impl Pipeline {
             push_sender,
             #[cfg(feature = "cache-aio")]
             cache_manager,
+            generation,
         );
         let f = stream::poll_fn(move |cx| {
             info!("BRIAN: polling main receiver, len = {}", receiver.len());
@@ -445,6 +453,8 @@ impl Pipeline {
     }
 }
 
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 /// A connection object which can be cloned, allowing requests to be be sent concurrently
 /// on the same underlying connection (tcp/unix socket).
 ///
@@ -463,6 +473,7 @@ pub struct MultiplexedConnection {
     db: i64,
     response_timeout: Option<Duration>,
     protocol: ProtocolVersion,
+    pub(crate) generation: usize,
     // This handle ensures that once all the clones of the connection will be dropped, the underlying task will stop.
     // This handle is only set for connection whose task was spawned by the crate, not for users who spawned their own
     // task.
@@ -548,9 +559,11 @@ impl MultiplexedConnection {
             })
             .transpose()?;
 
+        let generation = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (pipeline, driver) = Pipeline::new(
             codec,
             config.push_sender,
+            generation,
             #[cfg(feature = "cache-aio")]
             cache_manager_opt.clone(),
         );
@@ -560,6 +573,7 @@ impl MultiplexedConnection {
             response_timeout: config.response_timeout,
             protocol: connection_info.protocol,
             _task_handle: None,
+            generation,
             #[cfg(feature = "cache-aio")]
             cache_manager: cache_manager_opt,
         };

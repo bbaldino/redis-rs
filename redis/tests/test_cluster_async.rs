@@ -540,6 +540,9 @@ mod cluster_async {
                 Ok(ErrorConnection { inner })
             })
         }
+        fn gen(&self) -> usize {
+            self.inner.gen()
+        }
     }
 
     impl ConnectionLike for ErrorConnection {
