@@ -349,6 +349,7 @@ struct ClusterConnInner<C> {
     #[allow(clippy::complexity)]
     in_flight_requests: stream::FuturesUnordered<Pin<Box<Request<C>>>>,
     refresh_error: Option<RedisError>,
+    waker: Option<task::Waker>,
 }
 
 fn boxed_sleep(duration: Duration) -> BoxFuture<'static, ()> {
@@ -428,6 +429,7 @@ where
             in_flight_requests: Default::default(),
             refresh_error: None,
             state: ConnectionState::PollComplete,
+            waker: None,
         };
         Self::refresh_slots(connection.inner.clone()).await?;
         Ok(connection)
@@ -1041,6 +1043,11 @@ where
                     Poll::Ready(Some(result)) => result,
                     Poll::Ready(None) | Poll::Pending => break,
                 };
+            if self.in_flight_requests.len() < MAX_REQUESTS {
+                if let Some(waker) = self.waker.take() {
+                    waker.wake();
+                }
+            }
             info!("BRIAN: poll_complete got next state from in_flight_requests: {next:?}");
             match request_handling {
                 Some(Retry::MoveToPending { request }) => {
@@ -1163,14 +1170,26 @@ impl PollFlushAction {
     }
 }
 
+const MAX_REQUESTS: usize = 1000;
+
 impl<C> Sink<Message<C>> for ClusterConnInner<C>
 where
     C: ConnectionLike + Connect + Clone + Send + Sync + Unpin + 'static,
 {
     type Error = ();
 
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut task::Context) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        _cx: &mut task::Context,
+    ) -> Poll<Result<(), Self::Error>> {
+        if self.in_flight_requests.len() + self.inner.pending_requests.lock().unwrap().len()
+            > MAX_REQUESTS
+        {
+            self.waker = Some(_cx.waker().clone());
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
+        }
     }
 
     fn start_send(self: Pin<&mut Self>, msg: Message<C>) -> Result<(), Self::Error> {
